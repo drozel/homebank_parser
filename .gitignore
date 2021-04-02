@@ -1,2 +1,4 @@
 node_modules/
+config/decisions.json
 config/categories.json
+res.csv

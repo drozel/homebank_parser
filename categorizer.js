@@ -9,8 +9,9 @@ const { AutoComplete } = require('enquirer');
 
 const { exit } = require('process');
 const { type } = require('os');
+const { timingSafeEqual } = require('crypto');
 
-const DecisionsFilename = 'config/categories.json';
+const DecisionsFilename = 'config/decisions.json';
 
 async function asyncForEach(array, callback) {
 	for (let index = 0; index < array.length; index++) {
@@ -48,11 +49,17 @@ class TransactionMatcher {
 }
 
 class Categorizer {
-	constructor(categories_list) {
+	constructor(categories_list, verbose = false) {
 		this.categories = categories_list;
 		this.loadDecisions();
+		this.verbose = verbose;
 	}
 	
+	logDebug(msg) {
+		if (!this.verbose) return;
+		console.log(msg);
+	}
+
 	loadDecisions() {
 		if (fs.existsSync(DecisionsFilename)) {
 			this.decisions = JSON.parse(fs.readFileSync(DecisionsFilename));
@@ -69,150 +76,142 @@ class Categorizer {
 	}
 
 	applyCategory(tran, cat) {
+		var rv = { ...tran };
+
 		tran.category = cat.category;
 		tran.description = cat.description;
 		tran.memo = cat.memo;
+
+		return rv;
+	}
+
+	async tryCategorize(tran) {
+		var rv = {
+			res: "",
+			foundCategories: []
+		};
+		
+		this.logDebug(`trying to categorize: ${this.printTransaction(tran)}`);
+
+		// search matching categories for user file first, then in the cache
+		this.decisions.forEach(cat => {
+			var m = new TransactionMatcher(cat);
+			if (m.match(tran)) {
+				rv.foundCategories.push(cat);	
+				this.logDebug(`matches to: ${cat}`);
+			}
+		});
+
+		// only one cat => found, put description into the field. Else put it to conflicts or not found depending on result
+		if (rv.foundCategories.length === 0) {
+			this.logDebug(`no category!`);
+			rv.res = "not_found";
+		}
+		else if (rv.foundCategories.length === 1) {
+			this.applyCategory(tran, rv.foundCategories[0]);
+			this.logDebug(`parsed as ${rv.foundCategories[0]}`);
+			rv.res = "ok";
+		}
+		else {
+			this.logDebug(`conflicts between [${rv.foundCategories.join(';')}]`);
+			rv.res = "confilict";
+		}
+
+		return rv;
 	}
 
 	async categorize(data) {
 		console.log(`Input data contains ${data.entries.length} entries`);
 
-		var conflicted = [];
-		var notFound = [];
-
 		// go trough all transactions and search for mathing category
-		data.entries.forEach((tran, tranIndex) => {
-			var foundCategories = [];
+		var trans = data.entries.length;
+		await asyncForEach(data.entries, async(tran, idx) => {
+			if (!tran.tags) tran.tags = [];
 			
-			// search matching categories for user file first, then in the cache
-			this.decisions.forEach(cat => {
-				var m = new TransactionMatcher(cat);
-				if (m.match(tran)) foundCategories.push(cat);	
-			});
+			// categorize
+			var res = await this.tryCategorize(tran);
+			if (res.res == "ok") return;
 
-			// only one cat => found, put description into the field. Else put it to conflicts or not found depending on result
-			if      (foundCategories.length === 0) notFound.push(tranIndex);
-			else if (foundCategories.length === 1) this.applyCategory(tran, foundCategories[0]);
-			else                                   conflicted.push({entryIndex: tranIndex, matchingCategories: foundCategories});
-		});
+			console.log(chalk.green(`${idx+1}/${trans}`));
 
-		// if everything ok, we are done
-		if (conflicted.length === 0 && notFound.length === 0) return data;
+			if (res.res == "not_found") await this.processNotFound(tran);
+			if (res.res == "conflict") {
+				var cat = await this.processConflicts(tran, res.foundCategories);
+			}
 
-		// else, ask user for input data
-		await this.processWithUser(conflicted, notFound, data);
-
-		// post-process transactions
-		this.postProcess(data);
-	}
-
-	postProcess(data) {
-		data.entries.forEach(e => {
-			if (!e.tags) e.tags = [];
-
-			if (e.category === null) { // null categories are UNDONE transactions, mark them with the tag
-				e.category = '';
-				e.memo = e.raw;
-				e.tags.push('UNDONE');
+			if (cat === null) { // null categories are UNDONE transactions, mark them with the tag
+				tran.category = '';
+				tran.memo = e.tran;
+				tran.tags.push('UNDONE');
 			}
 		});
 	}
 
-	async processWithUser(conflicted, notFound, data) {
-		// process conflicted, user can chose existing category or skip it for the next step here
-		var toBeEnteredByUser = [];
-		if (conflicted.length > 0) toBeEnteredByUser = this.processConflicts(conflicted, data);
-
-		// just merge skipped at the previous step and not found at all. They all need to be defined by the user now
-		toBeEnteredByUser = toBeEnteredByUser.concat(notFound);
-		if (toBeEnteredByUser.length > 0) await this.processNotFound(toBeEnteredByUser, data);
-	}
-
-	processConflicts(conflicted, data) {
-		var rvNotFound = [];
-		
-		console.log(chalk.yellow(`We have ${conflicted.length} conflicts, let's process them:`));
-		
-		conflicted.forEach((c, i) => {
-			// possible conflicted categories are stored in struct, prepare text array for readline
-			var matchingCategoriesFormatted = [];
-			c.matchingCategories.forEach(c => {
-				matchingCategoriesFormatted.push(`${c.category} (${c.memo})`);
-			});
-
-			console.log(`\n${chalk.green(`CONFLICT ${i+1}/${conflicted.length}:`)}\n${this.printTransaction(data.entries[c.entryIndex])}\nis mathing to several categories. Please select the right one.`);
-			var index = readlineSync.keyInSelect(matchingCategoriesFormatted, 'Select desired category.', {cancel: 'SKIP. (You can enter another value on furter step)'});
-			if (index === -1) {
-				console.log(chalk.yellow('Transaction skipped and will be processed later'));
-				rvNotFound.push(c.entryIndex);
-				return;
-			}
-			var choice = c.matchingCategories[index];
-			console.log(chalk.green(`Transaction marked as '${choice.category} (${choice.memo})'`));
-			this.applyCategory(data.entries[i], choice);
+	async processConflicts(tran, foundCategories) {
+		var matchingCategoriesFormatted = [];
+		foundCategories.forEach(c => {
+			matchingCategoriesFormatted.push(`${c.category} (${c.memo})`);
 		});
 
-		return rvNotFound;
+		console.log(`\n${chalk.green(`CONFLICT:`)}\n${this.printTransaction(tran)}\nis matсhing to several categories. Please select the right one.`);
+		var index = readlineSync.keyInSelect(matchingCategoriesFormatted, 'Select desired category.', {cancel: 'SKIP. (You can enter another value on furter step)'});
+		if (index === -1) {
+			console.log(chalk.yellow('Transaction skipped and will be marked with UNDONE'));
+			return;
+		}
+
+		var choice = c.matchingCategories[index];
+		console.log(chalk.green(`Transaction marked as '${choice.category} (${choice.memo})'`));
+		this.applyCategory(tran, choice);
 	}
 	
-	async processNotFound(toBeEnteredByUser, data) {
-		/// we have entries without any decision (skipped and unknown). We precess them here
-		///   toBeEnteredByUser - array of transaction indexes need to be processed
-		// 	  data              - transactions
-
+	async processNotFound(tran) {
 		readlineSync.setDefaultOptions({defaultInput: ''});
 
-		console.log(chalk.yellow(`\n\nWe have ${toBeEnteredByUser.length} entities with undefined categories, let's process them:`));
-		
 		const ImportAsUndone = 'IMPORT AS UNDONE'; // some transactions can't be imported in homeBank (e.g. Internal Transfers). We import them marked and change manually
 		const NewCategory    = 'NEW CATEGORY';     // item for creating new category by the user
 		
-		var that = this;
-		await asyncForEach(toBeEnteredByUser, async(e, i) => {
-			const prompt = new AutoComplete({
-				name: 'categories',
-				message: 'Pick the category:',
-				limit: 20,
-				choices: [ImportAsUndone, NewCategory].concat(that.categories)
-			});
-			
-			var tran = data.entries[e];
-			var catName = '';
-
-			console.log(`\n${chalk.green(`TRANSACTION ${i+1}/${toBeEnteredByUser.length}:`)}\n ${this.printTransaction(tran)}: `);
-
-			try {
-				console.log('\n');
-				catName = await prompt.run();
-			} catch(e) {
-				console.log(chalk.red('Interrupted'));
-				process.exit(1);
-			}
-			
-			var cat = {};
-			var saveDecision = false;
-
-			if (catName === ImportAsUndone) {
-				cat.category = null;
-			} else
-			if (catName === NewCategory) {
-				cat.category = readlineSync.question('Enter the category: ');
-			} else {
-				cat.category = catName;
-			}
-
-			if (readlineSync.keyInYN(chalk.yellow('Remember this decision?'))) {	
-				cat.company     = readlineSync.question('Company mask (regexp): '),
-				cat.description = readlineSync.question('Description mask (regexp): ')
-				saveDecision = true;
-			}
-
-			cat.memo = readlineSync.question('Enter memo: ');
-
-			if (saveDecision) this.addCategory(cat);
-
-			this.applyCategory(tran, cat);
+		const prompt = new AutoComplete({
+			name: 'categories',
+			message: 'Pick the category:',
+			limit: 20,
+			choices: [ImportAsUndone, NewCategory].concat(this.categories)
 		});
+		
+		var catName = '';
+
+		console.log("Manual categorizer\n");
+		console.log(chalk.green(`${this.printTransaction(tran)}`));
+
+		try {
+			console.log('\n');
+			catName = await prompt.run();
+		} catch(e) {
+		}
+			
+		var cat = {};
+		var saveDecision = false;
+
+		if (catName === ImportAsUndone) {
+			cat.category = null;
+		} else
+		if (catName === NewCategory) {
+			cat.category = readlineSync.question('Enter the category: ');
+		} else {
+			cat.category = catName;
+		}
+
+		if (readlineSync.keyInYN(chalk.yellow('Remember this decision?'))) {	
+			cat.company     = readlineSync.question('Company mask (regexp): '),
+			cat.description = readlineSync.question('Description mask (regexp): ')
+			saveDecision = true;
+		}
+
+		cat.memo = readlineSync.question('Enter memo: ');
+
+		if (saveDecision) this.addCategory(cat);
+
+		this.applyCategory(tran, cat);
 	}
 
 	// helpers

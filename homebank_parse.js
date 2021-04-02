@@ -8,7 +8,7 @@ const HbGen = require('./hb_csvgen');
 const CsvParser = require('./csv_parser');
 const Categorizer = require('./categorizer');
 
-const CategoriesListFilepath = './cache/categorieslist.json'; 
+const CategoriesListFilepath = './config/categories.json'; 
 
 // command line config (+ help)
 const optionDefinitions = [
@@ -18,6 +18,7 @@ const optionDefinitions = [
 	{ name: 'schema',          alias: 's', type: String  },
 	{ name: 'loadcategories',  alias: 'l', type: String  },
 	{ name: 'zeroamount',      alias: 'z', type: Boolean },
+	{ name: 'verbose',         alias: 'v', type: Boolean },
 ]
 
 const usage = [
@@ -60,6 +61,11 @@ const usage = [
 			alias: 'z',
 			description: "Don't skip transactions with zero amount."
 		},
+		{
+			name: 'verbose',
+			alias: 'v',
+			description: "Print debug information"
+		},
 		
 		{
 		  name: 'help',
@@ -94,15 +100,10 @@ if (options.loadcategories) {
 	}
 }
 
-// normal parse mode
-//try {
-	parseCsv().then(res => {
-		 console.log(chalk.green(`${res} entries have been successfuly generated and written into ${options.output}!`));
-	});
-/*} catch (e) {
-	fail(e);
-}*/
-
+(async() => {
+	var res = await parseCsv();
+	console.log(chalk.green(`${res} entries have been successfuly generated and written into ${options.output}!`));
+})()
 
 async function parseCsv() {
 	// we parse CSV here with given schema, try to categorize transactions and generate output CSV
@@ -134,8 +135,9 @@ async function parseCsv() {
 	}
 
 	// categorize transactions
-	var categorizer = new Categorizer(categoriesList);
- 	await categorizer.categorize(data);
+	var categorizer = new Categorizer(categoriesList, options.verbose);
+	 await categorizer.categorize(data);
+	 console.log("xxx");
 	
 	// generate output CSV
 	var gen = new HbGen();

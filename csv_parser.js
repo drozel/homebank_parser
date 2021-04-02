@@ -95,7 +95,8 @@ class CsvParser {
 	}
 
 	addEntry(entry) {
-		this.data.entries.push(entry);
+		if (this.schema.inverse_order) this.data.entries.unshift(entry);
+		else                           this.data.entries.push(entry);
 	}
 
 	// utils

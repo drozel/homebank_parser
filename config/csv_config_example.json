@@ -20,6 +20,7 @@
 	"date_format": "DD-MM-YY",
 
 	"comma_as_point": true,
-	"includes_header": true
+	"includes_header": true,
 
+	"inverse_order": false
 }
