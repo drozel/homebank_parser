@@ -1,12 +1,13 @@
 const fs = require('fs');
 const chalk = require('chalk');
-const XmlParser = require('fast-xml-parser');
 const commandLineArgs = require('command-line-args')
 const commandLineUsage = require('command-line-usage')
 
 const HbGen = require('./hb_csvgen');
 const CsvParser = require('./csv_parser');
 const Categorizer = require('./categorizer');
+const HBParser = require('./hb_data_parser');
+const { relativeTimeThreshold } = require('moment');
 
 const CategoriesListFilepath = './config/categories.json'; 
 
@@ -14,9 +15,9 @@ const CategoriesListFilepath = './config/categories.json';
 const optionDefinitions = [
 	{ name: 'help',            alias: 'h', type: Boolean },
 	{ name: 'input',           alias: 'i', type: String  },
+	{ name: 'config',          alias: 'c', type: String  },
 	{ name: 'output',          alias: 'o', type: String  },
 	{ name: 'schema',          alias: 's', type: String  },
-	{ name: 'loadcategories',  alias: 'l', type: String  },
 	{ name: 'zeroamount',      alias: 'z', type: Boolean },
 	{ name: 'verbose',         alias: 'v', type: Boolean },
 ]
@@ -39,6 +40,12 @@ const usage = [
 		  description: 'The input CSV with transactions.'
 		},
 		{
+			name: 'config',
+			alias: 'c',
+			typeLabel: '{underline file}',
+		  	description: 'Path to HomeBank config file (for categories and accounts). Usually has an .xhb extension.'
+		},
+		{
 			name: 'output',
 			alias: 'o',
 			typeLabel: '{underline file}',
@@ -49,12 +56,6 @@ const usage = [
 			alias: 's',
 			typeLabel: '{underline file}',
 		  	description: 'Path to schema file with the input CSV format configuration'
-		},
-		{
-			name: 'loadcategories',
-			alias: 'l',
-			typeLabel: '{underline file}',
-			  description: 'Path to HomeBank file to parse existing categories. If once done, you will select from suggested categories instead of typing them every time.'
 		},
 		{
 			name: 'zeroamount',
@@ -90,38 +91,38 @@ if (options.help) {
 	return;
 }
 
-// load categories mode
-if (options.loadcategories) {
-	try {
-		var count = loadCategories();
-		exit(`${count} categories are load from HomeBank config and saved for further use`);
-	} catch (e) {
-		fail(e);
+class Logger {
+	constructor(verbose = false) {
+		this.verbose = verbose;
+		if (verbose) console.log(chalk.yellow("verbose mode activated, you will see a lot of logs"));
 	}
-}
 
+	info(msg) {
+		console.log(msg);
+	}
+
+	debug(msg) {
+		if (!this.verbose) return;
+		console.log(msg);
+	}
+};
+
+/////////////////////////////
+//        main
+////////////////////////////
 (async() => {
-	var res = await parseCsv();
-	console.log(chalk.green(`${res} entries have been successfuly generated and written into ${options.output}!`));
-})()
-
-async function parseCsv() {
-	// we parse CSV here with given schema, try to categorize transactions and generate output CSV
+	var log = new Logger(options.verbose);
 	
+	var hbData = new HBParser(options.config, log);
+	
+	// check input and output data 
 	checkFileOption(options.input, 'input csv file (-i)');
 	checkFileOption(options.schema, 'schema file (-s)');
 	fs.writeFileSync(options.output, '', (err) => {
 		fail(`cannot open output file for write (-o): ${option.output}`);
 	});
 	
-	// try to open known transactions
-	var categoriesList = null;
-	if (fs.existsSync(CategoriesListFilepath)) {
-		categoriesList = JSON.parse(fs.readFileSync(CategoriesListFilepath));
-		if (!Array.isArray(categoriesList)) fail(`Strange format of categories list (must be array): ${categories.list}`);
-	}
-	
-	// parse CSV using options file
+	// parse input csv
 	var schema = null;
 	schema = JSON.parse(fs.readFileSync(options.schema));
 
@@ -129,15 +130,14 @@ async function parseCsv() {
 	parser.parse();
 	
 	var data = parser.getData();
-	
+
 	if (!options.zeroamount) {
 		data.entries = data.entries.filter(t => t.amount !== 0.0);
 	}
 
 	// categorize transactions
-	var categorizer = new Categorizer(categoriesList, options.verbose);
-	 await categorizer.categorize(data);
-	 console.log("xxx");
+	var categorizer = new Categorizer(hbData.categories, log);
+	await categorizer.categorize(data);
 	
 	// generate output CSV
 	var gen = new HbGen();
@@ -146,65 +146,14 @@ async function parseCsv() {
 		throw `cannot open output file for write (-o): ${option.output}`;
 	});
 
-	return data.entries.length;
-}
-
-function loadCategories() {
-	checkFileOption(options.loadcategories, 'HomeBank config');
-
-	var xmlParserOpt = {
-		ignoreAttributes : false,
-		parseNodeValue : true,
-		parseAttributeValue : true,
-	};
-
-	var data = fs.readFileSync(options.loadcategories).toString();
-	if (!XmlParser.validate(data)) {
-		fail(`couldn't read XML from HomeBank data: ${options.loadCategories}`);
-	}
-	var homebankData = XmlParser.parse(data, xmlParserOpt);
-
-	var catsHash = [];
-	var categoriesAsText = [];
-	homebankData.homebank.cat.forEach(c => {
-		const key  = c['@_key'];
-		const name = c['@_name'];
-		var fullCatName;
-		if ('@_parent' in c) { // category with parent, build its name with the parent's one
-			var parentKey = c['@_parent'];
-			var parent = catsHash.find(p => p.key === parentKey);
-			if (!parent) throw `couldn't find parent ${parentKey} for the category ${key}`
-
-			fullCatName = parent.name + ':' + name;
-		} else { // standalone category
-			fullCatName = name;
-		}
-
-		// category found
-		categoriesAsText.push(fullCatName);
-		
-		// add to cache to use it by children
-		var cat = {
-			key: key,
-			name: fullCatName,
-		};
-		catsHash.push(cat);
-	})
-
-	fs.writeFileSync(CategoriesListFilepath, JSON.stringify(categoriesAsText));
-
-	return categoriesAsText.length;
-}
+	console.log(chalk.green(`${res} entries have been successfuly generated and written into ${options.output}!`));
+})()
 
 function fail(msg) {
 	console.log(chalk.red(msg));
 	process.exit(1);
 }
 
-function exit(msg) {
-	console.log(chalk.green(msg));
-	process.exit(0);
-}
 function checkFileOption(path, desc) {
 	if (path === '')          fail(`Please give correct path to ${desc}`);
 	if (!fs.existsSync(path)) fail(`Cannot read file ${desc} (given path: '${path}')`);

@@ -19,6 +19,7 @@ async function asyncForEach(array, callback) {
 	}
 }
 
+// matcher for transactions (see tran in csv_parser.js) by company or desc
 class TransactionMatcher {
 	constructFromRes(companyRe, descriptionRe) {
 		this.companyRe = new RegExp(companyRe);
@@ -49,17 +50,13 @@ class TransactionMatcher {
 }
 
 class Categorizer {
-	constructor(categories_list, verbose = false) {
+	constructor(categories_list, logger) {
 		this.categories = categories_list;
+		this.log = logger;
+
 		this.loadDecisions();
-		this.verbose = verbose;
 	}
 	
-	logDebug(msg) {
-		if (!this.verbose) return;
-		console.log(msg);
-	}
-
 	loadDecisions() {
 		if (fs.existsSync(DecisionsFilename)) {
 			this.decisions = JSON.parse(fs.readFileSync(DecisionsFilename));
@@ -67,7 +64,7 @@ class Categorizer {
 		} else {
 			this.decisions = [];
 		}
-		console.log(`${this.decisions.length} known decisions were load from file`);
+		this.log.info(chalk.green(this.decisions.length)+ " known decisions were load from file and will be used for new transactions");
 	}
 
 	addCategory(cat) {
@@ -91,29 +88,29 @@ class Categorizer {
 			foundCategories: []
 		};
 		
-		this.logDebug(`trying to categorize: ${this.printTransaction(tran)}`);
+		this.log.debug(`trying to categorize: ${tran.raw}`);
 
 		// search matching categories for user file first, then in the cache
 		this.decisions.forEach(cat => {
 			var m = new TransactionMatcher(cat);
 			if (m.match(tran)) {
 				rv.foundCategories.push(cat);	
-				this.logDebug(`matches to: ${cat}`);
+				this.log.debug(`matches to: ${cat}`);
 			}
 		});
 
 		// only one cat => found, put description into the field. Else put it to conflicts or not found depending on result
 		if (rv.foundCategories.length === 0) {
-			this.logDebug(`no category!`);
+			this.log.debug(`no category!`);
 			rv.res = "not_found";
 		}
 		else if (rv.foundCategories.length === 1) {
 			this.applyCategory(tran, rv.foundCategories[0]);
-			this.logDebug(`parsed as ${rv.foundCategories[0]}`);
+			this.log.debug(`parsed as ${rv.foundCategories[0]}`);
 			rv.res = "ok";
 		}
 		else {
-			this.logDebug(`conflicts between [${rv.foundCategories.join(';')}]`);
+			this.log.debug(`conflicts between [${rv.foundCategories.join(';')}]`);
 			rv.res = "confilict";
 		}
 
@@ -121,7 +118,7 @@ class Categorizer {
 	}
 
 	async categorize(data) {
-		console.log(`Input data contains ${data.entries.length} entries`);
+		this.log.info(`Input data contains ${data.entries.length} entries`);
 
 		// go trough all transactions and search for mathing category
 		var trans = data.entries.length;
@@ -132,36 +129,39 @@ class Categorizer {
 			var res = await this.tryCategorize(tran);
 			if (res.res == "ok") return;
 
-			console.log(chalk.green(`${idx+1}/${trans}`));
+			this.log.info("\n" + chalk.green(`${idx+1}/${trans}`));
+			this.log.info(`${this.printTransaction(tran, true)}`);
 
 			if (res.res == "not_found") await this.processNotFound(tran);
 			if (res.res == "conflict") {
-				var cat = await this.processConflicts(tran, res.foundCategories);
+				var cat = await this.processConflict(tran, res.foundCategories);
 			}
 
 			if (cat === null) { // null categories are UNDONE transactions, mark them with the tag
 				tran.category = '';
-				tran.memo = e.tran;
+				tran.memo = tran.raw;
 				tran.tags.push('UNDONE');
 			}
 		});
 	}
 
-	async processConflicts(tran, foundCategories) {
+	async processConflict(tran, foundCategories) {
 		var matchingCategoriesFormatted = [];
 		foundCategories.forEach(c => {
 			matchingCategoriesFormatted.push(`${c.category} (${c.memo})`);
 		});
 
-		console.log(`\n${chalk.green(`CONFLICT:`)}\n${this.printTransaction(tran)}\nis matсhing to several categories. Please select the right one.`);
-		var index = readlineSync.keyInSelect(matchingCategoriesFormatted, 'Select desired category.', {cancel: 'SKIP. (You can enter another value on furter step)'});
+		var index = readlineSync.keyInSelect(matchingCategoriesFormatted,
+										'This transaction matches to multiple categories.\nSelect a correct one:',
+										{cancel: 'SKIP. (You can enter another value on furter step)'});
+
 		if (index === -1) {
-			console.log(chalk.yellow('Transaction skipped and will be marked with UNDONE'));
+			this.log.info(chalk.yellow('Transaction skipped and will be marked with UNDONE'));
 			return;
 		}
 
 		var choice = c.matchingCategories[index];
-		console.log(chalk.green(`Transaction marked as '${choice.category} (${choice.memo})'`));
+		this.log.info(chalk.green(`Transaction marked as '${choice.category} (${choice.memo})'`));
 		this.applyCategory(tran, choice);
 	}
 	
@@ -180,13 +180,13 @@ class Categorizer {
 		
 		var catName = '';
 
-		console.log("Manual categorizer\n");
-		console.log(chalk.green(`${this.printTransaction(tran)}`));
-
 		try {
-			console.log('\n');
+			this.log.info('\n');
 			catName = await prompt.run();
 		} catch(e) {
+			this.cancelProcess();
+			await this.processNotFound(tran); // if not cancelled, just retry this func
+			return;
 		}
 			
 		var cat = {};
@@ -214,8 +214,16 @@ class Categorizer {
 		this.applyCategory(tran, cat);
 	}
 
+	async cancelProcess() {
+		readlineSync.setDefaultOptions({defaultInput: ''});
+		const msg = "If you stop categorizing you will lost all transactions you have already processed!\n"
+					"Do you want to cancel (y/n)?";
+		
+		if (readlineSync.keyInYN(chalk.red(msg))) exit(1);
+	}
+
 	// helpers
-	printTransaction(tran) {
+	printTransaction(tran, formatted = false) {
 		var colorizeAmount = function(val) {
 			if (val > 0) return chalk.green(val.toString());
 			if (val < 0) return chalk.red  (val.toString());
@@ -223,12 +231,16 @@ class Categorizer {
 			return chalk.white(val.toString());
 		}
 
-		return `\
-${chalk.yellow('Type: ')}        ${chalk.white(tran.type)}\n\		
-${chalk.yellow('Company: ')}     ${chalk.white(tran.company)}\n\
-${chalk.yellow('Description: ')} ${chalk.white(tran.description)}\n\
-${chalk.yellow('Amount: ')}      ${colorizeAmount(tran.amount)}\n\
-${chalk.yellow('Date:')}         ${chalk.white(moment(tran.date).format('DD-MM-YYYY'))}`;
+		if (formatted) { return `\
+	${chalk.yellow('Type: ')}        ${chalk.white(tran.type)}\n\
+	${chalk.yellow('Company: ')}     ${chalk.white(tran.company)}\n\
+	${chalk.yellow('Description: ')} ${chalk.white(tran.description)}\n\
+	${chalk.yellow('Amount: ')}      ${colorizeAmount(tran.amount)}\n\
+	${chalk.yellow('Date:')}         ${chalk.white(moment(tran.date).format('DD-MM-YYYY'))}\n\
+	${chalk.yellow('Raw data:')}     ${chalk.grey(tran.raw)}`;
+		} else {
+			return moment(tran.date).format('DD-MM-YYYY') + ": " + colorizeAmount(tran.amount) + "\" " + tran.company + ", " + tran.description + "\"";
+		}
 	}
 }
 

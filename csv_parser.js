@@ -1,7 +1,17 @@
 const fs = require('fs');
 const moment = require('moment');
-
 const lineReader = require('line-reader');
+
+/* tran	{
+	date: Datetime,
+	raw: string, (original data from import file)
+
+	amount: floating point (+ for income, - for expense),
+	type: string, (card_payment|direct_debit|transfer|income|refund)
+	company: string,
+	description: string,
+}	
+*/
 
 class CsvParser {
 	constructor(filepath, schema) {
@@ -10,19 +20,7 @@ class CsvParser {
 			parser: schema.name,
 			fields: null, // string fields description, from CSV header
 
-			entries: []
-			/* Entry struct:
-				{
-					date: Datetime,
-					rawdata: string, (original data from file)
-
-					amount: floating point (+ for income, - for expense),
-					type: string, (card_payment|direct_debit|transfer|income|refund)
-					company: string,
-					description: string,
-				}	
-			*/
-
+			entries: [] // transactions of type 'tran'
 		}
 
 		this.filepath = filepath;
@@ -57,7 +55,7 @@ class CsvParser {
 
 	parseEntry(orig, elems) {
 		var entry = {};
-		entry.rawdata = orig;
+		entry.raw = orig;
 
 		// date
 		entry.date = moment(elems[this.schema.fields.date], this.schema.date_format).toDate();
