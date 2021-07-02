@@ -140,7 +140,7 @@ class Categorizer {
 			if (cat === null) { // null categories are UNDONE transactions, mark them with the tag
 				tran.category = '';
 				tran.memo = tran.raw;
-				tran.tags.push('UNDONE');
+				print(`undone: ${JSON.dump(tran)}`)
 			}
 		});
 	}
@@ -207,7 +207,7 @@ class Categorizer {
 			saveDecision = true;
 		}
 
-		cat.memo = readlineSync.question('Enter memo: ');
+		if (cat.category) cat.memo = readlineSync.question('Enter memo: ');
 
 		if (saveDecision) this.addCategory(cat);
 
