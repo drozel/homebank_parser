@@ -21,14 +21,20 @@ class FileObserver(events.FileSystemEventHandler):
        
         if os.path.isfile(path):
             logging.info('file updated, parse it: %s' % ev.src_path)
-            self.parser.parse(ev.src_path)
+            self._parse(ev.src_path)
 
     def on_created(self, ev):
         path = ev.src_path
        
         if os.path.isfile(path):
             logging.info('file created, parse it: %s' % ev.src_path)
-            self.parser.parse(ev.src_path)
+            self._parse(ev.src_path)
+
+    def _parse(self, path):
+        try:
+            self.parser.parse(path)
+        except:
+            logging.warning('unknown error, parsing failed')
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
