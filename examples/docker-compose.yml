@@ -1,0 +1,22 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgis/postgis:13-3.1-alpine
+    command: postgres -c listen_addresses='*' -c max_connections=250
+    volumes:
+      - ./data/postgres/data:/var/lib/postgresql/data
+      - ./data/postgres/init:/docker-entrypoint-initdb.d
+    environment:
+      - POSTGRES_PASSWORD=drozel
+      - POSTGRES_USER=drozel
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drozel"]
+  homeparser:
+    image: homeparser
+    volumes:
+      - ./data/homeparser:/usr/src/homeparser/indata
+    environment:
+      - DB_HOST=postgres
+      - DB_NAME=homeparser
+      - DB_USER=drozel
+      - DB_PASSWORD=drozel

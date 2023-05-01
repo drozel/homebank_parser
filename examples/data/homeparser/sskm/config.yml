@@ -1,0 +1,14 @@
+format: 'csv'          # only supported now
+name: 'sskm giro'      # the name to identify the acccount
+separator: ';'         # fields separator (not alsways comma)
+header: True           # first line is the header, will be ignored
+locale: 'de_DE'        # locale for number parsing
+fields:                # fields description. Is a dict if additional options required or just a number (of the csv's field, counting from 0)
+  date:           
+    format: '%d.%m.%y'
+    number: 1
+  account: 0
+  type: 4
+  payee: 12
+  desc: 5
+  sum: 14
